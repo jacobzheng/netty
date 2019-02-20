@@ -154,8 +154,8 @@ public final class PlatformDependent {
                 DIRECT_MEMORY_COUNTER = new AtomicLong();
             }
         }
-        DIRECT_MEMORY_LIMIT = maxDirectMemory;
         logger.debug("-Dio.netty.maxDirectMemory: {} bytes", maxDirectMemory);
+        DIRECT_MEMORY_LIMIT = maxDirectMemory >= 1 ? maxDirectMemory : MAX_DIRECT_MEMORY;
 
         int tryAllocateUninitializedArray =
                 SystemPropertyUtil.getInt("io.netty.uninitializedArrayAllocationThreshold", 1024);
@@ -284,7 +284,7 @@ public final class PlatformDependent {
      * Returns the maximum memory reserved for direct buffer allocation.
      */
     public static long maxDirectMemory() {
-        return MAX_DIRECT_MEMORY;
+        return DIRECT_MEMORY_LIMIT;
     }
 
     /**
@@ -649,16 +649,12 @@ public final class PlatformDependent {
 
     private static void incrementMemoryCounter(int capacity) {
         if (DIRECT_MEMORY_COUNTER != null) {
-            for (;;) {
-                long usedMemory = DIRECT_MEMORY_COUNTER.get();
-                long newUsedMemory = usedMemory + capacity;
-                if (newUsedMemory > DIRECT_MEMORY_LIMIT) {
-                    throw new OutOfDirectMemoryError("failed to allocate " + capacity
-                            + " byte(s) of direct memory (used: " + usedMemory + ", max: " + DIRECT_MEMORY_LIMIT + ')');
-                }
-                if (DIRECT_MEMORY_COUNTER.compareAndSet(usedMemory, newUsedMemory)) {
-                    break;
-                }
+            long newUsedMemory = DIRECT_MEMORY_COUNTER.addAndGet(capacity);
+            if (newUsedMemory > DIRECT_MEMORY_LIMIT) {
+                DIRECT_MEMORY_COUNTER.addAndGet(-capacity);
+                throw new OutOfDirectMemoryError("failed to allocate " + capacity
+                        + " byte(s) of direct memory (used: " + (newUsedMemory - capacity)
+                        + ", max: " + DIRECT_MEMORY_LIMIT + ')');
             }
         }
     }

@@ -17,6 +17,8 @@
 package io.netty.buffer;
 
 
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
+
 import io.netty.buffer.PoolArena.SizeClass;
 import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
@@ -65,10 +67,7 @@ final class PoolThreadCache {
     PoolThreadCache(PoolArena<byte[]> heapArena, PoolArena<ByteBuffer> directArena,
                     int tinyCacheSize, int smallCacheSize, int normalCacheSize,
                     int maxCachedBufferCapacity, int freeSweepAllocationThreshold) {
-        if (maxCachedBufferCapacity < 0) {
-            throw new IllegalArgumentException("maxCachedBufferCapacity: "
-                    + maxCachedBufferCapacity + " (expected: >= 0)");
-        }
+        checkPositiveOrZero(maxCachedBufferCapacity, "maxCachedBufferCapacity");
         this.freeSweepAllocationThreshold = freeSweepAllocationThreshold;
         this.heapArena = heapArena;
         this.directArena = directArena;
@@ -200,12 +199,13 @@ final class PoolThreadCache {
      * Returns {@code true} if it fit into the cache {@code false} otherwise.
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    boolean add(PoolArena<?> area, PoolChunk chunk, long handle, int normCapacity, SizeClass sizeClass) {
+    boolean add(PoolArena<?> area, PoolChunk chunk, ByteBuffer nioBuffer,
+                long handle, int normCapacity, SizeClass sizeClass) {
         MemoryRegionCache<?> cache = cache(area, normCapacity, sizeClass);
         if (cache == null) {
             return false;
         }
-        return cache.add(chunk, handle);
+        return cache.add(chunk, nioBuffer, handle);
     }
 
     private MemoryRegionCache<?> cache(PoolArena<?> area, int normCapacity, SizeClass sizeClass) {
@@ -346,8 +346,8 @@ final class PoolThreadCache {
 
         @Override
         protected void initBuf(
-                PoolChunk<T> chunk, long handle, PooledByteBuf<T> buf, int reqCapacity) {
-            chunk.initBufWithSubpage(buf, handle, reqCapacity);
+                PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, PooledByteBuf<T> buf, int reqCapacity) {
+            chunk.initBufWithSubpage(buf, nioBuffer, handle, reqCapacity);
         }
     }
 
@@ -361,8 +361,8 @@ final class PoolThreadCache {
 
         @Override
         protected void initBuf(
-                PoolChunk<T> chunk, long handle, PooledByteBuf<T> buf, int reqCapacity) {
-            chunk.initBuf(buf, handle, reqCapacity);
+                PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, PooledByteBuf<T> buf, int reqCapacity) {
+            chunk.initBuf(buf, nioBuffer, handle, reqCapacity);
         }
     }
 
@@ -381,15 +381,15 @@ final class PoolThreadCache {
         /**
          * Init the {@link PooledByteBuf} using the provided chunk and handle with the capacity restrictions.
          */
-        protected abstract void initBuf(PoolChunk<T> chunk, long handle,
+        protected abstract void initBuf(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle,
                                         PooledByteBuf<T> buf, int reqCapacity);
 
         /**
          * Add to cache if not already full.
          */
         @SuppressWarnings("unchecked")
-        public final boolean add(PoolChunk<T> chunk, long handle) {
-            Entry<T> entry = newEntry(chunk, handle);
+        public final boolean add(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle) {
+            Entry<T> entry = newEntry(chunk, nioBuffer, handle);
             boolean queued = queue.offer(entry);
             if (!queued) {
                 // If it was not possible to cache the chunk, immediately recycle the entry
@@ -407,7 +407,7 @@ final class PoolThreadCache {
             if (entry == null) {
                 return false;
             }
-            initBuf(entry.chunk, entry.handle, buf, reqCapacity);
+            initBuf(entry.chunk, entry.nioBuffer, entry.handle, buf, reqCapacity);
             entry.recycle();
 
             // allocations is not thread-safe which is fine as this is only called from the same thread all time.
@@ -453,16 +453,18 @@ final class PoolThreadCache {
         private  void freeEntry(Entry entry) {
             PoolChunk chunk = entry.chunk;
             long handle = entry.handle;
+            ByteBuffer nioBuffer = entry.nioBuffer;
 
             // recycle now so PoolChunk can be GC'ed.
             entry.recycle();
 
-            chunk.arena.freeChunk(chunk, handle, sizeClass);
+            chunk.arena.freeChunk(chunk, handle, sizeClass, nioBuffer);
         }
 
         static final class Entry<T> {
             final Handle<Entry<?>> recyclerHandle;
             PoolChunk<T> chunk;
+            ByteBuffer nioBuffer;
             long handle = -1;
 
             Entry(Handle<Entry<?>> recyclerHandle) {
@@ -471,15 +473,17 @@ final class PoolThreadCache {
 
             void recycle() {
                 chunk = null;
+                nioBuffer = null;
                 handle = -1;
                 recyclerHandle.recycle(this);
             }
         }
 
         @SuppressWarnings("rawtypes")
-        private static Entry newEntry(PoolChunk<?> chunk, long handle) {
+        private static Entry newEntry(PoolChunk<?> chunk, ByteBuffer nioBuffer, long handle) {
             Entry entry = RECYCLER.get();
             entry.chunk = chunk;
+            entry.nioBuffer = nioBuffer;
             entry.handle = handle;
             return entry;
         }

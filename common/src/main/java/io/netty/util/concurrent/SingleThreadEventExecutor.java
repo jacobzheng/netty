@@ -595,19 +595,8 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         gracefulShutdownQuietPeriod = unit.toNanos(quietPeriod);
         gracefulShutdownTimeout = unit.toNanos(timeout);
 
-        if (oldState == ST_NOT_STARTED) {
-            try {
-                doStartThread();
-            } catch (Throwable cause) {
-                STATE_UPDATER.set(this, ST_TERMINATED);
-                terminationFuture.tryFailure(cause);
-
-                if (!(cause instanceof Exception)) {
-                    // Also rethrow as it may be an OOME for example
-                    PlatformDependent.throwException(cause);
-                }
-                return terminationFuture;
-            }
+        if (ensureThreadStarted(oldState)) {
+            return terminationFuture;
         }
 
         if (wakeup) {
@@ -658,19 +647,8 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             }
         }
 
-        if (oldState == ST_NOT_STARTED) {
-            try {
-                doStartThread();
-            } catch (Throwable cause) {
-                STATE_UPDATER.set(this, ST_TERMINATED);
-                terminationFuture.tryFailure(cause);
-
-                if (!(cause instanceof Exception)) {
-                    // Also rethrow as it may be an OOME for example
-                    PlatformDependent.throwException(cause);
-                }
-                return;
-            }
+        if (ensureThreadStarted(oldState)) {
+            return;
         }
 
         if (wakeup) {
@@ -778,8 +756,20 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         addTask(task);
         if (!inEventLoop) {
             startThread();
-            if (isShutdown() && removeTask(task)) {
-                reject();
+            if (isShutdown()) {
+                boolean reject = false;
+                try {
+                    if (removeTask(task)) {
+                        reject = true;
+                    }
+                } catch (UnsupportedOperationException e) {
+                    // The task queue does not support removal so the best thing we can do is to just move on and
+                    // hope we will be able to pick-up the task before its completely terminated.
+                    // In worst case we will log on termination.
+                }
+                if (reject) {
+                    reject();
+                }
             }
         }
 
@@ -823,7 +813,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     /**
      * Returns the {@link ThreadProperties} of the {@link Thread} that powers the {@link SingleThreadEventExecutor}.
-     * If the {@link SingleThreadEventExecutor} is not started yet, this operation will start it and block until the
+     * If the {@link SingleThreadEventExecutor} is not started yet, this operation will start it and block until
      * it is fully started.
      */
     public final ThreadProperties threadProperties() {
@@ -881,6 +871,24 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
     }
 
+    private boolean ensureThreadStarted(int oldState) {
+        if (oldState == ST_NOT_STARTED) {
+            try {
+                doStartThread();
+            } catch (Throwable cause) {
+                STATE_UPDATER.set(this, ST_TERMINATED);
+                terminationFuture.tryFailure(cause);
+
+                if (!(cause instanceof Exception)) {
+                    // Also rethrow as it may be an OOME for example
+                    PlatformDependent.throwException(cause);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void doStartThread() {
         assert thread == null;
         executor.execute(new Runnable() {
@@ -927,6 +935,12 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                         try {
                             cleanup();
                         } finally {
+                            // Lets remove all FastThreadLocals for the Thread as we are about to terminate and notify
+                            // the future. The user may block on the future and once it unblocks the JVM may terminate
+                            // and start unloading classes.
+                            // See https://github.com/netty/netty/issues/6596.
+                            FastThreadLocal.removeAll();
+
                             STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
                             threadLock.release();
                             if (!taskQueue.isEmpty()) {
@@ -935,7 +949,6 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                                             "non-empty task queue (" + taskQueue.size() + ')');
                                 }
                             }
-
                             terminationFuture.setSuccess(null);
                         }
                     }

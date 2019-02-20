@@ -42,8 +42,10 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.locks.Lock;
 
@@ -134,7 +136,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private static final AtomicIntegerFieldUpdater<ReferenceCountedOpenSslEngine> DESTROYED_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ReferenceCountedOpenSslEngine.class, "destroyed");
 
-    private static final String INVALID_CIPHER = "SSL_NULL_WITH_NULL_NULL";
     private static final SSLEngineResult NEED_UNWRAP_OK = new SSLEngineResult(OK, NEED_UNWRAP, 0, 0);
     private static final SSLEngineResult NEED_UNWRAP_CLOSED = new SSLEngineResult(CLOSED, NEED_UNWRAP, 0, 0);
     private static final SSLEngineResult NEED_WRAP_OK = new SSLEngineResult(OK, NEED_WRAP, 0, 0);
@@ -192,6 +193,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     };
 
     private volatile ClientAuth clientAuth = ClientAuth.NONE;
+    private volatile Certificate[] localCertificateChain;
 
     // Updated once a new handshake is started and so the SSLSession reused.
     private volatile long lastAccessed = -1;
@@ -215,7 +217,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private final OpenSslEngineMap engineMap;
     private final OpenSslApplicationProtocolNegotiator apn;
     private final OpenSslSession session;
-    private final Certificate[] localCerts;
     private final ByteBuffer[] singleSrcBuffer = new ByteBuffer[1];
     private final ByteBuffer[] singleDstBuffer = new ByteBuffer[1];
     private final boolean enableOcsp;
@@ -288,9 +289,10 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                                 if (algs == null) {
                                     peerSupportedSignatureAlgorithms = EmptyArrays.EMPTY_STRINGS;
                                 } else {
-                                    List<String> algorithmList = new ArrayList<String>(algs.length);
+                                    Set<String> algorithmList = new LinkedHashSet<String>(algs.length);
                                     for (String alg: algs) {
                                         String converted = SignatureAlgorithmConverter.toJavaName(alg);
+
                                         if (converted != null) {
                                             algorithmList.add(converted);
                                         }
@@ -321,8 +323,11 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             session = new DefaultOpenSslSession(context.sessionContext());
         }
         engineMap = context.engineMap;
-        localCerts = context.keyCertChain;
         enableOcsp = context.enableOcsp;
+        // context.keyCertChain will only be non-null if we do not use the KeyManagerFactory. In this case
+        // localCertificateChain will be set in setKeyMaterial(...).
+        localCertificateChain = context.keyCertChain;
+
         this.jdkCompatibilityMode = jdkCompatibilityMode;
         Lock readerLock = context.ctxLock.readLock();
         readerLock.lock();
@@ -375,6 +380,11 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         // Only create the leak after everything else was executed and so ensure we don't produce a false-positive for
         // the ResourceLeakDetector.
         leak = leakDetection ? leakDetector.track(this) : null;
+    }
+
+    final void setKeyMaterial(OpenSslKeyMaterial keyMaterial) throws  Exception {
+        SSL.setKeyMaterial(ssl, keyMaterial.certificateChainAddress(), keyMaterial.privateKeyAddress());
+        localCertificateChain = keyMaterial.certificateChain();
     }
 
     /**
@@ -1189,7 +1199,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         // See https://github.com/netty/netty/issues/3900
         if (SSL.bioLengthNonApplication(networkBIO) > 0) {
             if (handshakeException == null && handshakeState != HandshakeState.FINISHED) {
-                // we seems to have data left that needs to be transfered and so the user needs
+                // we seems to have data left that needs to be transferred and so the user needs
                 // call wrap(...). Store the error so we can pick it up later.
                 handshakeException = new SSLHandshakeException(SSL.getErrorString(stackError));
             }
@@ -1409,7 +1419,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         final StringBuilder buf = new StringBuilder();
         final StringBuilder bufTLSv13 = new StringBuilder();
 
-        CipherSuiteConverter.convertToCipherStrings(Arrays.asList(cipherSuites), buf, bufTLSv13);
+        CipherSuiteConverter.convertToCipherStrings(Arrays.asList(cipherSuites), buf, bufTLSv13, OpenSsl.isBoringSSL());
         final String cipherSuiteSpec = buf.toString();
         final String cipherSuiteSpecTLSv13 = bufTLSv13.toString();
 
@@ -1715,7 +1725,8 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             return null;
         }
 
-        String prefix = toJavaCipherSuitePrefix(SSL.getVersion(ssl));
+        String version = SSL.getVersion(ssl);
+        String prefix = toJavaCipherSuitePrefix(version);
         return CipherSuiteConverter.toJava(openSslCipherSuite, prefix);
     }
 
@@ -1927,6 +1938,8 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         // thread.
         private X509Certificate[] x509PeerCerts;
         private Certificate[] peerCerts;
+        private Certificate[] localCerts;
+
         private String protocol;
         private String cipher;
         private byte[] id;
@@ -2003,12 +2016,16 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             if (value == null) {
                 throw new NullPointerException("value");
             }
-            Map<String, Object> values = this.values;
-            if (values == null) {
-                // Use size of 2 to keep the memory overhead small
-                values = this.values = new HashMap<String, Object>(2);
+            final Object old;
+            synchronized (this) {
+                Map<String, Object> values = this.values;
+                if (values == null) {
+                    // Use size of 2 to keep the memory overhead small
+                    values = this.values = new HashMap<String, Object>(2);
+                }
+                old = values.put(name, value);
             }
-            Object old = values.put(name, value);
+
             if (value instanceof SSLSessionBindingListener) {
                 // Use newSSLSessionBindingEvent so we alway use the wrapper if needed.
                 ((SSLSessionBindingListener) value).valueBound(newSSLSessionBindingEvent(name));
@@ -2021,10 +2038,12 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             if (name == null) {
                 throw new NullPointerException("name");
             }
-            if (values == null) {
-                return null;
+            synchronized (this) {
+                if (values == null) {
+                    return null;
+                }
+                return values.get(name);
             }
-            return values.get(name);
         }
 
         @Override
@@ -2032,21 +2051,28 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             if (name == null) {
                 throw new NullPointerException("name");
             }
-            Map<String, Object> values = this.values;
-            if (values == null) {
-                return;
+
+            final Object old;
+            synchronized (this) {
+                Map<String, Object> values = this.values;
+                if (values == null) {
+                    return;
+                }
+                old = values.remove(name);
             }
-            Object old = values.remove(name);
+
             notifyUnbound(old, name);
         }
 
         @Override
         public String[] getValueNames() {
-            Map<String, Object> values = this.values;
-            if (values == null || values.isEmpty()) {
-                return EmptyArrays.EMPTY_STRINGS;
+            synchronized (this) {
+                Map<String, Object> values = this.values;
+                if (values == null || values.isEmpty()) {
+                    return EmptyArrays.EMPTY_STRINGS;
+                }
+                return values.keySet().toArray(new String[0]);
             }
-            return values.keySet().toArray(new String[0]);
         }
 
         private void notifyUnbound(Object value, String name) {
@@ -2067,6 +2093,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                     id = SSL.getSessionId(ssl);
                     cipher = toJavaCipherSuite(SSL.getCipherForSSL(ssl));
                     protocol = SSL.getVersion(ssl);
+                    localCerts = localCertificateChain;
 
                     initPeerCerts();
                     selectApplicationProtocol();
@@ -2238,7 +2265,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         public String getCipherSuite() {
             synchronized (ReferenceCountedOpenSslEngine.this) {
                 if (cipher == null) {
-                    return INVALID_CIPHER;
+                    return SslUtils.INVALID_CIPHER;
                 }
                 return cipher;
             }

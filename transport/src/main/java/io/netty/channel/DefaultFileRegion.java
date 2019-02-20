@@ -15,6 +15,8 @@
  */
 package io.netty.channel;
 
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
+
 import io.netty.util.AbstractReferenceCounted;
 import io.netty.util.IllegalReferenceCountException;
 import io.netty.util.internal.logging.InternalLogger;
@@ -44,7 +46,7 @@ public class DefaultFileRegion extends AbstractReferenceCounted implements FileR
     /**
      * Create a new instance
      *
-     * @param file      the {@link FileChannel} which should be transfered
+     * @param file      the {@link FileChannel} which should be transferred
      * @param position  the position from which the transfer should start
      * @param count     the number of bytes to transfer
      */
@@ -52,12 +54,8 @@ public class DefaultFileRegion extends AbstractReferenceCounted implements FileR
         if (file == null) {
             throw new NullPointerException("file");
         }
-        if (position < 0) {
-            throw new IllegalArgumentException("position must be >= 0 but was " + position);
-        }
-        if (count < 0) {
-            throw new IllegalArgumentException("count must be >= 0 but was " + count);
-        }
+        checkPositiveOrZero(position, "position");
+        checkPositiveOrZero(count, "count");
         this.file = file;
         this.position = position;
         this.count = count;
@@ -68,7 +66,7 @@ public class DefaultFileRegion extends AbstractReferenceCounted implements FileR
      * Create a new instance using the given {@link File}. The {@link File} will be opened lazily or
      * explicitly via {@link #open()}.
      *
-     * @param f         the {@link File} which should be transfered
+     * @param f         the {@link File} which should be transferred
      * @param position  the position from which the transfer should start
      * @param count     the number of bytes to transfer
      */
@@ -76,12 +74,8 @@ public class DefaultFileRegion extends AbstractReferenceCounted implements FileR
         if (f == null) {
             throw new NullPointerException("f");
         }
-        if (position < 0) {
-            throw new IllegalArgumentException("position must be >= 0 but was " + position);
-        }
-        if (count < 0) {
-            throw new IllegalArgumentException("count must be >= 0 but was " + count);
-        }
+        checkPositiveOrZero(position, "position");
+        checkPositiveOrZero(count, "count");
         this.position = position;
         this.count = count;
         this.f = f;

@@ -43,6 +43,7 @@ import java.util.Locale;
 
 import static io.netty.util.internal.MathUtil.isOutOfBounds;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 import static io.netty.util.internal.StringUtil.NEWLINE;
 import static io.netty.util.internal.StringUtil.isSurrogate;
 
@@ -56,7 +57,7 @@ public final class ByteBufUtil {
     private static final FastThreadLocal<byte[]> BYTE_ARRAYS = new FastThreadLocal<byte[]>() {
         @Override
         protected byte[] initialValue() throws Exception {
-            return PlatformDependent.allocateUninitializedArray(1024);
+            return PlatformDependent.allocateUninitializedArray(MAX_TL_ARRAY_LEN);
         }
     };
 
@@ -93,6 +94,16 @@ public final class ByteBufUtil {
 
         MAX_CHAR_BUFFER_SIZE = SystemPropertyUtil.getInt("io.netty.maxThreadLocalCharBufferSize", 16 * 1024);
         logger.debug("-Dio.netty.maxThreadLocalCharBufferSize: {}", MAX_CHAR_BUFFER_SIZE);
+    }
+
+    static final int MAX_TL_ARRAY_LEN = 1024;
+
+    /**
+     * Allocates a new array if minLength > {@link ByteBufUtil#MAX_TL_ARRAY_LEN}
+     */
+    static byte[] threadLocalTempArray(int minLength) {
+        return minLength <= MAX_TL_ARRAY_LEN ? BYTE_ARRAYS.get()
+            : PlatformDependent.allocateUninitializedArray(minLength);
     }
 
     /**
@@ -452,8 +463,9 @@ public final class ByteBufUtil {
     }
 
     private static int lastIndexOf(ByteBuf buffer, int fromIndex, int toIndex, byte value) {
-        fromIndex = Math.min(fromIndex, buffer.capacity());
-        if (fromIndex < 0 || buffer.capacity() == 0) {
+        int capacity = buffer.capacity();
+        fromIndex = Math.min(fromIndex, capacity);
+        if (fromIndex < 0 || capacity == 0) {
             return -1;
         }
 
@@ -546,17 +558,8 @@ public final class ByteBufUtil {
                     buffer._setByte(writerIndex++, WRITE_UTF_UNKNOWN);
                     break;
                 }
-                if (!Character.isLowSurrogate(c2)) {
-                    buffer._setByte(writerIndex++, WRITE_UTF_UNKNOWN);
-                    buffer._setByte(writerIndex++, Character.isHighSurrogate(c2) ? WRITE_UTF_UNKNOWN : c2);
-                    continue;
-                }
-                int codePoint = Character.toCodePoint(c, c2);
-                // See http://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G2630.
-                buffer._setByte(writerIndex++, (byte) (0xf0 | (codePoint >> 18)));
-                buffer._setByte(writerIndex++, (byte) (0x80 | ((codePoint >> 12) & 0x3f)));
-                buffer._setByte(writerIndex++, (byte) (0x80 | ((codePoint >> 6) & 0x3f)));
-                buffer._setByte(writerIndex++, (byte) (0x80 | (codePoint & 0x3f)));
+                // Extra method to allow inlining the rest of writeUtf8 which is the most likely code path.
+                writerIndex = writeUtf8Surrogate(buffer, writerIndex, c, c2);
             } else {
                 buffer._setByte(writerIndex++, (byte) (0xe0 | (c >> 12)));
                 buffer._setByte(writerIndex++, (byte) (0x80 | ((c >> 6) & 0x3f)));
@@ -564,6 +567,21 @@ public final class ByteBufUtil {
             }
         }
         return writerIndex - oldWriterIndex;
+    }
+
+    private static int writeUtf8Surrogate(AbstractByteBuf buffer, int writerIndex, char c, char c2) {
+        if (!Character.isLowSurrogate(c2)) {
+            buffer._setByte(writerIndex++, WRITE_UTF_UNKNOWN);
+            buffer._setByte(writerIndex++, Character.isHighSurrogate(c2) ? WRITE_UTF_UNKNOWN : c2);
+            return writerIndex;
+        }
+        int codePoint = Character.toCodePoint(c, c2);
+        // See http://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G2630.
+        buffer._setByte(writerIndex++, (byte) (0xf0 | (codePoint >> 18)));
+        buffer._setByte(writerIndex++, (byte) (0x80 | ((codePoint >> 12) & 0x3f)));
+        buffer._setByte(writerIndex++, (byte) (0x80 | ((codePoint >> 6) & 0x3f)));
+        buffer._setByte(writerIndex++, (byte) (0x80 | (codePoint & 0x3f)));
+        return writerIndex;
     }
 
     /**
@@ -768,11 +786,7 @@ public final class ByteBufUtil {
             array = src.array();
             offset = src.arrayOffset() + readerIndex;
         } else {
-            if (len <= 1024) {
-                array = BYTE_ARRAYS.get();
-            } else {
-                array = PlatformDependent.allocateUninitializedArray(len);
-            }
+            array = threadLocalTempArray(len);
             offset = 0;
             src.getBytes(readerIndex, array, 0, len);
         }
@@ -823,13 +837,14 @@ public final class ByteBufUtil {
      * If {@code copy} is false the underlying storage will be shared, if possible.
      */
     public static byte[] getBytes(ByteBuf buf, int start, int length, boolean copy) {
-        if (isOutOfBounds(start, length, buf.capacity())) {
+        int capacity = buf.capacity();
+        if (isOutOfBounds(start, length, capacity)) {
             throw new IndexOutOfBoundsException("expected: " + "0 <= start(" + start + ") <= start + length(" + length
-                    + ") <= " + "buf.capacity(" + buf.capacity() + ')');
+                    + ") <= " + "buf.capacity(" + capacity + ')');
         }
 
         if (buf.hasArray()) {
-            if (copy || start != 0 || length != buf.capacity()) {
+            if (copy || start != 0 || length != capacity) {
                 int baseOffset = buf.arrayOffset() + start;
                 return Arrays.copyOfRange(buf.array(), baseOffset, baseOffset + length);
             } else {
@@ -986,9 +1001,7 @@ public final class ByteBufUtil {
         }
 
         private static String hexDump(ByteBuf buffer, int fromIndex, int length) {
-            if (length < 0) {
-              throw new IllegalArgumentException("length: " + length);
-            }
+            checkPositiveOrZero(length, "length");
             if (length == 0) {
               return "";
             }
@@ -1008,9 +1021,7 @@ public final class ByteBufUtil {
         }
 
         private static String hexDump(byte[] array, int fromIndex, int length) {
-            if (length < 0) {
-              throw new IllegalArgumentException("length: " + length);
-            }
+            checkPositiveOrZero(length, "length");
             if (length == 0) {
                 return "";
             }
@@ -1392,7 +1403,9 @@ public final class ByteBufUtil {
             int chunkLen = Math.min(length, WRITE_CHUNK_SIZE);
             buffer.clear().position(position);
 
-            if (allocator.isDirectBufferPooled()) {
+            if (length <= MAX_TL_ARRAY_LEN || !allocator.isDirectBufferPooled()) {
+                getBytes(buffer, threadLocalTempArray(chunkLen), 0, chunkLen, out, length);
+            } else {
                 // if direct buffers are pooled chances are good that heap buffers are pooled as well.
                 ByteBuf tmpBuf = allocator.heapBuffer(chunkLen);
                 try {
@@ -1402,9 +1415,6 @@ public final class ByteBufUtil {
                 } finally {
                     tmpBuf.release();
                 }
-            } else {
-                byte[] tmp = PlatformDependent.allocateUninitializedArray(length);
-                getBytes(buffer, tmp, 0, chunkLen, out, length);
             }
         }
     }

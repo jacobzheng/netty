@@ -44,6 +44,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -250,7 +251,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
                     }
                 } else {
                     CipherSuiteConverter.convertToCipherStrings(
-                            unmodifiableCiphers, cipherBuilder, cipherTLSv13Builder);
+                            unmodifiableCiphers, cipherBuilder, cipherTLSv13Builder, OpenSsl.isBoringSSL());
 
                     // Set non TLSv1.3 ciphers.
                     SSLContext.setCipherSuite(ctx, cipherBuilder.toString(), false);
@@ -400,6 +401,17 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls);
     }
 
+    @Override
+    protected SslHandler newHandler(ByteBufAllocator alloc, boolean startTls, Executor executor) {
+        return new SslHandler(newEngine0(alloc, null, -1, false), startTls, executor);
+    }
+
+    @Override
+    protected SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort,
+                                    boolean startTls, Executor executor) {
+        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), executor);
+    }
+
     SSLEngine newEngine0(ByteBufAllocator alloc, String peerHost, int peerPort, boolean jdkCompatibilityMode) {
         return new ReferenceCountedOpenSslEngine(this, alloc, peerHost, peerPort, jdkCompatibilityMode, true);
     }
@@ -421,13 +433,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
      */
     @Deprecated
     public final long context() {
-        Lock readerLock = ctxLock.readLock();
-        readerLock.lock();
-        try {
-            return ctx;
-        } finally {
-            readerLock.unlock();
-        }
+        return sslCtxPointer();
     }
 
     /**
@@ -502,7 +508,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         Lock readerLock = ctxLock.readLock();
         readerLock.lock();
         try {
-            return ctx;
+            return SSLContext.getSslCtx(ctx);
         } finally {
             readerLock.unlock();
         }

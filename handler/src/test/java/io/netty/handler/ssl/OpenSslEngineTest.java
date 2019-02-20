@@ -67,21 +67,23 @@ public class OpenSslEngineTest extends SSLEngineTest {
     private static final String PREFERRED_APPLICATION_LEVEL_PROTOCOL = "my-protocol-http2";
     private static final String FALLBACK_APPLICATION_LEVEL_PROTOCOL = "my-protocol-http1_1";
 
-    @Parameterized.Parameters(name = "{index}: bufferType = {0}, combo = {1}")
+    @Parameterized.Parameters(name = "{index}: bufferType = {0}, combo = {1}, delegate = {2}")
     public static Collection<Object[]> data() {
         List<Object[]> params = new ArrayList<Object[]>();
         for (BufferType type: BufferType.values()) {
-            params.add(new Object[] { type, ProtocolCipherCombo.tlsv12()});
+            params.add(new Object[] { type, ProtocolCipherCombo.tlsv12(), false });
+            params.add(new Object[] { type, ProtocolCipherCombo.tlsv12(), true });
 
             if (OpenSsl.isTlsv13Supported()) {
-                params.add(new Object[] { type, ProtocolCipherCombo.tlsv13() });
+                params.add(new Object[] { type, ProtocolCipherCombo.tlsv13(), false });
+                params.add(new Object[] { type, ProtocolCipherCombo.tlsv13(), true });
             }
         }
         return params;
     }
 
-    public OpenSslEngineTest(BufferType type, ProtocolCipherCombo cipherCombo) {
-        super(type, cipherCombo);
+    public OpenSslEngineTest(BufferType type, ProtocolCipherCombo cipherCombo, boolean delegate) {
+        super(type, cipherCombo, delegate);
     }
 
     @BeforeClass
@@ -93,6 +95,20 @@ public class OpenSslEngineTest extends SSLEngineTest {
     public void tearDown() throws InterruptedException {
         super.tearDown();
         assertEquals("SSL error stack not correctly consumed", 0, SSL.getLastErrorNumber());
+    }
+
+    @Override
+    @Test
+    public void testSessionAfterHandshakeKeyManagerFactory() throws Exception {
+        checkShouldUseKeyManagerFactory();
+        super.testSessionAfterHandshakeKeyManagerFactory();
+    }
+
+    @Override
+    @Test
+    public void testSessionAfterHandshakeKeyManagerFactoryMutualAuth() throws Exception {
+        checkShouldUseKeyManagerFactory();
+        super.testSessionAfterHandshakeKeyManagerFactoryMutualAuth();
     }
 
     @Override
